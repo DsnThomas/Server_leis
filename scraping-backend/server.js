@@ -4,51 +4,29 @@ const cheerio = require('cheerio');
 const Database = require('better-sqlite3');
 const cors = require('cors');
 const he = require('he');
-const axiosRetry = require('axios-retry');
 
 const app = express();
 app.use(cors());
 
 const db = new Database('./laws.db');
 
-// Cria a tabela se não existir
 db.prepare(`
   CREATE TABLE IF NOT EXISTS laws (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    law_type TEXT,
+    law_type TEXT UNIQUE,
     content TEXT,
     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `).run();
 
-// Configura o axios para repetir requisições em caso de erro
-axiosRetry(axios, {
-  retries: 3, // Tenta 3 vezes antes de falhar
-  retryDelay: (retryCount) => retryCount * 2000, // Espera 2s, 4s, 6s entre tentativas
-  retryCondition: (error) => error.code === 'ECONNRESET' || error.response?.status >= 500
-});
-
-// Função para buscar e processar dados
+// Função para buscar e processar dados diretamente
 async function fetchAndParseData(url) {
   try {
-    const { data } = await axios.get(url, {
-      responseType: 'arraybuffer',
-      responseEncoding: 'binary',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      }
-    });
+    const { data } = await axios.get(url, { timeout: 10000 });
 
-    let decodedText;
-    try {
-      decodedText = new TextDecoder('windows-1252').decode(new Uint8Array(data));
-    } catch {
-      decodedText = new TextDecoder('utf-8').decode(new Uint8Array(data));
-    }
-
-    return parseHTML(decodedText);
+    return parseHTML(data);
   } catch (error) {
-    console.error('Erro ao buscar e decodificar dados:', error.message);
+    console.error(`Erro ao buscar dados de ${url}:`, error.message);
     return null;
   }
 }
@@ -57,23 +35,23 @@ async function fetchAndParseData(url) {
 function parseHTML(html) {
   const $ = cheerio.load(html);
 
-  $('img').remove();
+  $('img, script, style').remove();
   $('a').removeAttr('href');
-  $('link[rel="stylesheet"]').each((_, element) => {
-    const href = $(element).attr('href');
-    if (href && href.startsWith('/')) {
-      $(element).attr('href', 'https://www.planalto.gov.br' + href);
-    }
-  });
 
-  return $.html();
+  return he.decode($.html());
 }
 
 // Salva ou atualiza o conteúdo no banco de dados
 async function updateLaw(lawType, url) {
   const content = await fetchAndParseData(url);
   if (content) {
-    db.prepare(`INSERT INTO laws (law_type, content) VALUES (?, ?)`).run(lawType, content);
+    db.prepare(`
+      INSERT INTO laws (law_type, content, last_updated) 
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(law_type) DO UPDATE 
+      SET content = excluded.content, last_updated = CURRENT_TIMESTAMP
+    `).run(lawType, content);
+
     console.log(`Lei ${lawType} atualizada no banco de dados.`);
   }
 }
@@ -90,13 +68,13 @@ app.get('/laws/:lawType', (req, res) => {
   `).get(lawType);
 
   if (row) {
-    res.send(he.decode(row.content));
+    res.send(row.content);
   } else {
     res.status(404).json({ error: 'Lei não encontrada' });
   }
 });
 
-// Lista de leis para atualizar
+// Leis a serem atualizadas periodicamente
 const lawsToUpdate = [
   { type: 'codigo-civil', url: 'https://www.planalto.gov.br/ccivil_03/Leis/2002/L10406compilada.htm' },
   { type: 'processo-civil', url: 'https://www.planalto.gov.br/ccivil_03/decreto-lei/1937-1946/del1608.htm' },
@@ -111,11 +89,11 @@ const lawsToUpdate = [
   { type: 'estatuto-deficiencia', url: 'https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2015/lei/l13146.htm' },
 ];
 
-// Agendar atualizações periódicas
-function scheduleLawUpdates() {
-  lawsToUpdate.forEach(law => {
-    updateLaw(law.type, law.url);
-  });
+// Atualiza todas as leis ao iniciar
+async function scheduleLawUpdates() {
+  for (const law of lawsToUpdate) {
+    await updateLaw(law.type, law.url);
+  }
 }
 
 scheduleLawUpdates();
@@ -123,7 +101,6 @@ scheduleLawUpdates();
 // Atualiza a cada 24 horas
 setInterval(scheduleLawUpdates, 24 * 60 * 60 * 1000);
 
-// Inicializa o servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
