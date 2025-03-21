@@ -3,15 +3,13 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const Database = require('better-sqlite3');
 const cors = require('cors');
-const { TextDecoder } = require('util');
-const he = require('he'); // Adicionado para decodificar HTML
+const he = require('he');
 
 const app = express();
 app.use(cors());
 
 const db = new Database('./laws.db');
 
-// Cria a tabela se não existir
 db.prepare(`
   CREATE TABLE IF NOT EXISTS laws (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,40 +19,23 @@ db.prepare(`
   )
 `).run();
 
-// Função para buscar e processar dados
 async function fetchAndParseData(url) {
   try {
-    const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
-    const { data } = await axios.get(proxyUrl, { responseType: 'arraybuffer' });
-
-    const decoder = new TextDecoder('windows-1252');
-    const decodedText = decoder.decode(new Uint8Array(data));
-
-    return parseHTML(decodedText);
+    const { data } = await axios.get(url, { responseType: 'arraybuffer', responseEncoding: 'binary' });
+    return parseHTML(data.toString('latin1'));
   } catch (error) {
     console.error('Erro ao buscar e decodificar dados:', error.message);
     return null;
   }
 }
 
-// Processa e limpa o HTML
 function parseHTML(html) {
   const $ = cheerio.load(html);
-
-  // Remove links e estilos
   $('img').remove();
   $('a').removeAttr('href');
-  $('link[rel="stylesheet"]').each((_, element) => {
-    const href = $(element).attr('href');
-    if (href && href.startsWith('/')) {
-      $(element).attr('href', 'https://www.planalto.gov.br' + href);
-    }
-  });
-
   return $.html();
 }
 
-// Salva ou atualiza o conteúdo no banco de dados
 async function updateLaw(lawType, url) {
   const content = await fetchAndParseData(url);
   if (content) {
@@ -62,15 +43,12 @@ async function updateLaw(lawType, url) {
       INSERT INTO laws (law_type, content) 
       VALUES (?, ?)
     `).run(lawType, content);
-
     console.log(`Lei ${lawType} atualizada no banco de dados.`);
   }
 }
 
-// Endpoint para obter conteúdo de leis
 app.get('/laws/:lawType', (req, res) => {
   const lawType = req.params.lawType;
-
   const row = db.prepare(`
     SELECT content FROM laws 
     WHERE law_type = ? 
@@ -79,15 +57,12 @@ app.get('/laws/:lawType', (req, res) => {
   `).get(lawType);
 
   if (row) {
-    // Decodifica os caracteres HTML escapados antes de enviar
-    const decodedHtml = he.decode(row.content);
-    res.send(decodedHtml); // Envia o HTML decodificado
+    res.send(he.decode(row.content));
   } else {
     res.status(404).json({ error: 'Lei não encontrada' });
   }
 });
 
-// Leis a serem atualizadas periodicamente
 const lawsToUpdate = [
   { type: 'codigo-civil', url: 'https://www.planalto.gov.br/ccivil_03/Leis/2002/L10406compilada.htm' },
   { type: 'processo-civil', url: 'https://www.planalto.gov.br/ccivil_03/decreto-lei/1937-1946/del1608.htm' },
@@ -102,7 +77,6 @@ const lawsToUpdate = [
   { type: 'estatuto-deficiencia', url: 'https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2015/lei/l13146.htm' },
 ];
 
-// Agendar atualizações periódicas
 function scheduleLawUpdates() {
   lawsToUpdate.forEach(law => {
     updateLaw(law.type, law.url);
@@ -110,11 +84,8 @@ function scheduleLawUpdates() {
 }
 
 scheduleLawUpdates();
-
-// Atualiza a cada 24 horas
 setInterval(scheduleLawUpdates, 24 * 60 * 60 * 1000);
 
-// Inicializa o servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
