@@ -5,7 +5,7 @@ const Database = require('better-sqlite3');
 const cors = require('cors');
 const he = require('he');
 const iconv = require('iconv-lite');
-const axiosRetry = require('axios-retry');
+const { default: axiosRetry } = require('axios-retry');
 
 const app = express();
 app.use(cors());
